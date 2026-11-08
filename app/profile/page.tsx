@@ -1,8 +1,14 @@
+import { getSessionUser } from "@/lib/session";
 import type { Metadata } from "next";
+import Link from "next/link";
 import { cookies } from "next/headers";
 import { prisma } from "@/lib/prisma";
-import { loginAsUser, logoutUser, registerAndLoginUser } from "@/app/actions";
+import { loginAsSubscriber, loginAsUser, logoutUser } from "@/app/actions";
 import { getTranslation } from "@/lib/translations";
+import { ArrowRight, Award, BadgeCheck, BarChart3, Bot, Building2, CircleHelp, Clock3, Database, ExternalLink, ShieldCheck, UserRound, Users } from "lucide-react";
+import styles from "./Profile.module.css";
+import RegisterAccountForm from "./RegisterAccountForm";
+import SubscriptionStatus from "./SubscriptionStatus";
 
 export const dynamic = "force-dynamic";
 
@@ -11,195 +17,217 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false }
 };
 
-export default async function ProfilePage() {
+const reviewStatuses = ["QUEUED", "NEEDS_REVIEW", "ANALYZED", "FETCHING"];
+
+function statusClass(status: string) {
+  if (status === "APPROVED") return styles.statusApproved;
+  if (["REJECTED", "FAILED"].includes(status)) return styles.statusRejected;
+  return styles.statusReview;
+}
+
+function workflowProgress(status: string) {
+  if (status === "APPROVED") return 4;
+  if (["NEEDS_REVIEW", "ANALYZED"].includes(status)) return 3;
+  if (["FETCHING", "FAILED"].includes(status)) return 2;
+  if (status === "REJECTED") return 3;
+  return 1;
+}
+
+export default async function ProfilePage({
+  searchParams
+}: {
+  searchParams: Promise<{ accountError?: string }>;
+}) {
+  const params = await searchParams;
   const cookieStore = await cookies();
-  const currentEmail = cookieStore.get("user_email")?.value;
-  const currentRole = cookieStore.get("user_role")?.value;
+  const session = await getSessionUser();
+  const currentEmail = session?.email;
+  const currentRole = session?.role || "USER";
+  const demoRole = cookieStore.get("demo_account")?.value;
+  const isDemoAccount = process.env.NODE_ENV !== "production" &&
+    Boolean(currentEmail) && ["USER", "COMPANY", "ADMIN"].includes(demoRole || "") && demoRole === currentRole;
   const lang = (cookieStore.get("lang")?.value || "en") as "en" | "th";
   const t = getTranslation(lang);
+  const accountErrorMessage = lang === "th"
+    ? "ยังบันทึกบัญชีไม่ได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง หรือตรวจสอบการเชื่อมต่อฐานข้อมูล"
+    : "We could not save this account right now. Please try again or check the database connection.";
 
-  let users: any[] = [];
-  let currentUser: any = null;
-  let userSubmissions: any[] = [];
+  let users: Array<{ id: string; name: string | null; email: string; role: string; createdAt: Date }> = [];
+  let currentUser: { name: string | null; email: string; role: string; createdAt: Date; submissions: Array<{ id: string; title: string; url: string | null; submissionType: string; status: string; reviewNotes: string | null; notes: string | null; createdAt: Date }>; companyMemberships: Array<{ role: string; company: { name: string; isVerified: boolean } }> } | null = null;
+  let databaseOffline = false;
+
   try {
-    [users, currentUser] = await Promise.all([
-      prisma.user.findMany({ orderBy: { createdAt: "desc" }, take: 20 }),
-      currentEmail
-        ? prisma.user.findUnique({
-            where: { email: currentEmail },
-            include: { submissions: { orderBy: { createdAt: "desc" }, take: 50 } }
-          })
-        : Promise.resolve(null)
-    ]);
-    userSubmissions = currentUser?.submissions ?? [];
+    if (isDemoAccount && currentEmail) {
+      const companyName = cookieStore.get("demo_company_name")?.value;
+      currentUser = {
+        name: currentEmail.split("@")[0],
+        email: currentEmail,
+        role: demoRole!,
+        createdAt: new Date(),
+        submissions: [],
+        companyMemberships: demoRole === "COMPANY" && companyName
+          ? [{ role: "OWNER", company: { name: companyName, isVerified: false } }]
+          : []
+      };
+    } else {
+      const [userList, account] = await Promise.all([
+        currentRole === "ADMIN" ? prisma.user.findMany({ orderBy: { createdAt: "desc" }, take: 20, select: { id: true, name: true, email: true, role: true, createdAt: true } }) : Promise.resolve([]),
+        currentEmail ? prisma.user.findUnique({ where: { email: currentEmail }, include: { submissions: { orderBy: { createdAt: "desc" }, take: 50 }, companyMemberships: { include: { company: true }, take: 1 } } }) : Promise.resolve(null)
+      ]);
+      users = userList;
+      currentUser = account ? { name: account.name, email: account.email, role: account.role, createdAt: account.createdAt, submissions: account.submissions, companyMemberships: account.companyMemberships } : null;
+    }
   } catch (error) {
-    console.error("Failed to query users in profile page:", error);
+    console.error("Failed to query profile data:", error);
+    databaseOffline = true;
   }
 
-  return (
-    <>
-      <h1>{t.profileTitle}</h1>
-      <p className="muted" style={{ marginBottom: "18px" }}>{t.profileDesc}</p>
-      
-      {currentEmail ? (
-        <section className="panel" style={{ border: "1px solid var(--accent)", marginBottom: "20px" }}>
-          <h2>Current Session Status</h2>
-          <div style={{ display: "flex", flexDirection: "column", gap: "8px", margin: "10px 0" }}>
-            <div><strong>Logged in as:</strong> <code>{currentEmail}</code></div>
-            <div><strong>Role:</strong> <span className={`badge ${currentRole === "ADMIN" ? "ok" : ""}`}>{currentRole}</span></div>
+  const submissions = currentUser?.submissions ?? [];
+  const approved = submissions.filter((item) => item.status === "APPROVED").length;
+  const approvedShowcase = submissions.filter((item) => item.status === "APPROVED").slice(0, 3);
+  const inReview = submissions.filter((item) => reviewStatuses.includes(item.status)).length;
+  const displayName = currentUser?.name || currentUser?.email.split("@")[0] || (lang === "th" ? "สมาชิก Atlas" : "Atlas member");
+  const activeRole = currentUser?.role || currentRole;
+  const companyMembership = currentUser?.companyMemberships[0];
+  const profileCopy = lang === "th" ? {
+    accountKicker: "บัญชี HUMANOIDTH", contribute: "ร่วมส่งข้อมูลให้ Atlas", databaseOffline: "ข้อมูลบัญชีใช้งานไม่ได้ชั่วคราว กรุณาลองใหม่อีกครั้งในสักครู่",
+    workspaceKicker: "พื้นที่ทำงานของคุณใน ATLAS", welcomeTitle: "เก็บผลงานของคุณไว้ในที่เดียว", welcomeLead: "เข้าสู่ระบบด้วยอีเมลเพื่อติดตามรายการที่ส่ง สถานะการตรวจสอบ และสร้างประวัติผลงานสาธารณะของคุณ",
+    trackStatus: "ติดตามสถานะรายการ", keepEvidence: "เก็บหลักฐานของคุณ", connectCommunity: "เชื่อมต่องานของคุณกับชุมชน", simpleAccount: "บัญชีเรียบง่ายสำหรับมีส่วนร่วมใน Atlas สาธารณะ",
+    welcome: "ยินดีต้อนรับ", signInTitle: "เข้าสู่ระบบหรือสร้างบัญชี", signInLead: "ใช้อีเมลที่คุณเข้าถึงได้", tryMock: "ลองใช้บัญชีตัวอย่าง",
+    individual: "บุคคล", individualDemo: "เรียน ใช้ simulator และแข่งขัน", company: "บริษัท", companyDemo: "ส่งรุ่นหุ่นยนต์และดูผลประเมิน", admin: "ผู้ดูแลระบบ", adminDemo: "ตรวจสอบบัญชีและงานปฏิบัติการ", subscriber: "สมาชิก Dashboard", subscriberDemo: "ทดลอง subscription และเข้าหน้า Dashboard",
+    signedIn: "เข้าสู่ระบบแล้ว", signOut: "ออกจากระบบ", contributionSummary: "สรุปผลงาน", submitted: "ส่งแล้ว", recordsShared: "รายการที่แชร์", approved: "อนุมัติแล้ว", accepted: "ได้รับเข้าระบบ Atlas", inReview: "กำลังตรวจสอบ", awaitingReview: "รอการตรวจสอบ",
+    companyWorkspace: "พื้นที่ทำงานบริษัท", companyAccount: "บัญชีบริษัท", verified: "องค์กรยืนยันแล้ว", awaitingVerification: "โปรไฟล์บริษัทกำลังรอการยืนยัน", openCompanyPortal: "เปิดพอร์ทัลบริษัท",
+    activity: "กิจกรรมของคุณ", history: "ประวัติการส่งข้อมูล", historyLead: "ติดตามรายการที่คุณแชร์กับ Atlas", submitRecord: "ส่งรายการ", submittedStep: "ส่งแล้ว", processing: "กำลังประมวลผล", review: "ตรวจสอบ", inAtlas: "อยู่ใน Atlas", openSource: "เปิดแหล่งข้อมูล",
+    noSubmissions: "ยังไม่มีรายการที่ส่ง", noSubmissionsLead: "ส่งข้อมูลรุ่นหุ่นยนต์ แหล่งงานวิจัย หรือคำแก้ไข เพื่อเริ่มสร้างประวัติผลงานของคุณ", submitFirst: "ส่งรายการแรกของคุณ",
+    administration: "การดูแลระบบ", atlasAccounts: "บัญชี Atlas", accountsLead: "บัญชีที่เพิ่งสมัครในพื้นที่ทำงานนี้", accounts: "บัญชี", unnamedMember: "สมาชิกที่ยังไม่ระบุชื่อ", noAccounts: "ไม่พบบัญชี"
+  } : {
+    accountKicker: "HUMANOIDTH ACCOUNT", contribute: "Contribute to the atlas", databaseOffline: "Account data is temporarily unavailable. Please refresh in a moment.",
+    workspaceKicker: "YOUR ATLAS WORKSPACE", welcomeTitle: "Keep your contributions in one place.", welcomeLead: "Sign in with your email to follow submissions, check review progress, and build your public contribution history.",
+    trackStatus: "Track submission status", keepEvidence: "Keep a record of your evidence", connectCommunity: "Connect your work to the community", simpleAccount: "A simple account for participating in the public atlas",
+    welcome: "WELCOME", signInTitle: "Sign in or create an account", signInLead: "Use an email address you can access.", tryMock: "Try a mock account",
+    individual: "Individual", individualDemo: "Learn, simulate, and compete", company: "Company", companyDemo: "Submit models and view evaluations", admin: "Administrator", adminDemo: "Review accounts and operations", subscriber: "Dashboard subscriber", subscriberDemo: "Try a subscription and open dashboards",
+    signedIn: "SIGNED IN", signOut: "Sign out", contributionSummary: "Contribution summary", submitted: "Submitted", recordsShared: "records shared", approved: "Approved", accepted: "accepted into Atlas", inReview: "In review", awaitingReview: "awaiting review",
+    companyWorkspace: "COMPANY WORKSPACE", companyAccount: "Company account", verified: "Verified organization", awaitingVerification: "Company profile awaiting verification", openCompanyPortal: "Open Company Portal",
+    activity: "YOUR ACTIVITY", history: "Submission history", historyLead: "Follow the records you have shared with the atlas.", submitRecord: "Submit a record", submittedStep: "Submitted", processing: "Processing", review: "Review", inAtlas: "In Atlas", openSource: "Open source",
+    noSubmissions: "No submissions yet", noSubmissionsLead: "Share a robot model, research source, or correction to start your contribution history.", submitFirst: "Submit your first record",
+    administration: "ADMINISTRATION", atlasAccounts: "Atlas accounts", accountsLead: "Recently registered accounts in this workspace.", accounts: "accounts", unnamedMember: "Unnamed member", noAccounts: "No accounts found."
+  };
+  const roleLabel: Record<string, string> = lang === "th"
+    ? { USER: "บุคคล", COMPANY: "บริษัท", ADMIN: "ผู้ดูแลระบบ" }
+    : { USER: "User", COMPANY: "Company", ADMIN: "Administrator" };
+  const statusLabel: Record<string, string> = lang === "th"
+    ? { QUEUED: "อยู่ในคิว", NEEDS_REVIEW: "รอการตรวจสอบ", ANALYZED: "วิเคราะห์แล้ว", FETCHING: "กำลังประมวลผล", APPROVED: "อนุมัติแล้ว", REJECTED: "ไม่อนุมัติ", FAILED: "ไม่สำเร็จ" }
+    : { QUEUED: "Queued", NEEDS_REVIEW: "Needs review", ANALYZED: "Analyzed", FETCHING: "Processing", APPROVED: "Approved", REJECTED: "Rejected", FAILED: "Failed" };
+  const showcaseCopy = lang === "th" ? {
+    eyebrow: "ผลงานใน ATLAS",
+    title: "ผลงานที่แสดงใน Atlas",
+    description: "รายการที่ผ่านการอนุมัติและเผยแพร่แล้ว",
+    approved: "เผยแพร่แล้ว",
+    emptyTitle: "ผลงานแรกของคุณจะแสดงที่นี่",
+    emptyDescription: "เมื่อรายการผ่านการตรวจทานและอนุมัติ ระบบจะแสดงหลักฐานที่เผยแพร่แล้วในส่วนนี้",
+    source: "เปิดหลักฐาน",
+    add: "ส่งผลงาน"
+  } : {
+    eyebrow: "ATLAS CONTRIBUTIONS",
+    title: "Contribution showcase",
+    description: "Approved work published to the public atlas.",
+    approved: "published records",
+    emptyTitle: "Your first published record will appear here",
+    emptyDescription: "Once a submission is reviewed and approved, its public evidence link will be featured here.",
+    source: "View evidence",
+    add: "Add a contribution"
+  };
+
+  return <div className={styles.profilePage}>
+    <header className={styles.pageHeading}>
+      <div><span className={styles.kicker}>{profileCopy.accountKicker}</span><h1>{t.profileTitle}</h1><p>{t.profileDesc}</p></div>
+      <Link className={styles.headingLink} href="/submit-data">{profileCopy.contribute} <ArrowRight size={16} aria-hidden="true" /></Link>
+    </header>
+
+    {(databaseOffline || params.accountError === "database") && <div className={styles.warning} role="status">{params.accountError === "database" ? accountErrorMessage : profileCopy.databaseOffline}</div>}
+
+    {!currentEmail ? <div className={styles.signedOutLayout}>
+      <section className={styles.welcomeCard}>
+        <span className={styles.welcomeIcon}><UserRound size={22} aria-hidden="true" /></span>
+        <span className={styles.kicker}>{profileCopy.workspaceKicker}</span>
+        <h2>{profileCopy.welcomeTitle}</h2>
+        <p>{profileCopy.welcomeLead}</p>
+        <div className={styles.benefitList}><span><BadgeCheck size={17} aria-hidden="true" />{profileCopy.trackStatus}</span><span><Database size={17} aria-hidden="true" />{profileCopy.keepEvidence}</span><span><Users size={17} aria-hidden="true" />{profileCopy.connectCommunity}</span></div>
+        <div className={styles.welcomeFoot}><ShieldCheck size={16} aria-hidden="true" />{profileCopy.simpleAccount}</div>
+      </section>
+
+      <section className={styles.authCard}>
+        <div className={styles.cardHeading}><span className={styles.kicker}>{profileCopy.welcome}</span><h2>{profileCopy.signInTitle}</h2><p>{profileCopy.signInLead}</p></div>
+        <RegisterAccountForm lang={lang} />
+        {process.env.NODE_ENV !== "production" && <details className={styles.demoAccess}><summary><CircleHelp size={15} aria-hidden="true" />{profileCopy.tryMock}</summary><div className={styles.demoAccountGrid}>
+          <form action={loginAsUser.bind(null, "member.demo@humanoidth.local", "USER", undefined)}><button type="submit"><UserRound size={16} aria-hidden="true" /><span><strong>{profileCopy.individual}</strong><small>{profileCopy.individualDemo}</small></span></button></form>
+          <form action={loginAsUser.bind(null, "company.demo@humanoidth.local", "COMPANY", "Eastern Automation Lab (อีสเทิร์น ออโตเมชัน)")}><button type="submit"><Building2 size={16} aria-hidden="true" /><span><strong>{profileCopy.company}</strong><small>{profileCopy.companyDemo}</small></span></button></form>
+          <form action={loginAsUser.bind(null, "admin.demo@humanoidth.local", "ADMIN", undefined)}><button type="submit"><ShieldCheck size={16} aria-hidden="true" /><span><strong>{profileCopy.admin}</strong><small>{profileCopy.adminDemo}</small></span></button></form>
+          <form action={loginAsSubscriber}><button type="submit"><BarChart3 size={16} aria-hidden="true" /><span><strong>{profileCopy.subscriber}</strong><small>{profileCopy.subscriberDemo}</small></span></button></form>
+        </div></details>}
+      </section>
+    </div> : <>
+      <section className={styles.accountOverview}>
+        <div className={styles.identityCard}>
+          <div className={styles.avatar}>{displayName.slice(0, 1).toUpperCase()}</div>
+          <div className={styles.identityCopy}><span className={styles.kicker}>{profileCopy.signedIn}</span><h2>{displayName}</h2><p>{currentEmail}</p><span className={`${styles.roleBadge} ${activeRole === "ADMIN" ? styles.adminRole : ""}`}><ShieldCheck size={13} aria-hidden="true" />{roleLabel[activeRole] || activeRole}</span></div>
+          <form action={logoutUser}><button type="submit" className={styles.logoutButton}>{profileCopy.signOut}</button></form>
+        </div>
+        <div className={styles.statsGrid} aria-label={profileCopy.contributionSummary}>
+          <article className={styles.statCard}><span><Database size={16} aria-hidden="true" />{profileCopy.submitted}</span><strong>{submissions.length}</strong><small>{profileCopy.recordsShared}</small></article>
+          <article className={styles.statCard}><span><BadgeCheck size={16} aria-hidden="true" />{profileCopy.approved}</span><strong>{approved}</strong><small>{profileCopy.accepted}</small></article>
+          <article className={styles.statCard}><span><Clock3 size={16} aria-hidden="true" />{profileCopy.inReview}</span><strong>{inReview}</strong><small>{profileCopy.awaitingReview}</small></article>
+        </div>
+      </section>
+
+      <SubscriptionStatus th={lang === "th"} />
+
+      {activeRole === "COMPANY" && <section className={styles.companyWorkspace}>
+        <span className={styles.companyWorkspaceIcon}><Building2 size={20} aria-hidden="true" /></span>
+        <div><span className={styles.kicker}>{profileCopy.companyWorkspace}</span><h2>{companyMembership?.company.name || profileCopy.companyAccount}</h2><p>{companyMembership?.company.isVerified ? profileCopy.verified : profileCopy.awaitingVerification} · {companyMembership?.role || "OWNER"}</p></div>
+        <Link className={styles.secondaryButton} href="/company/models/new">{profileCopy.openCompanyPortal} <ArrowRight size={14} aria-hidden="true" /></Link>
+      </section>}
+
+      <section className={styles.showcaseSection} aria-labelledby="profile-showcase-title">
+        <header className={styles.showcaseHeading}>
+          <div><span className={styles.kicker}>{showcaseCopy.eyebrow}</span><h2 id="profile-showcase-title">{showcaseCopy.title}</h2><p>{showcaseCopy.description}</p></div>
+          <Link href="/submit-data" className={styles.secondaryButton}>{showcaseCopy.add} <ArrowRight size={14} aria-hidden="true" /></Link>
+        </header>
+        <div className={styles.showcaseGrid}>
+          <article className={styles.showcaseImpact}>
+            <span className={styles.showcaseImpactIcon}><Award size={19} aria-hidden="true" /></span>
+            <span className={styles.showcaseImpactLabel}>{showcaseCopy.approved}</span>
+            <strong>{approved}</strong>
+            <span className={styles.showcaseImpactFoot}>{displayName}</span>
+          </article>
+          <div className={styles.showcaseRecords}>
+            {approvedShowcase.length ? approvedShowcase.map((item) => <article className={styles.showcaseRecord} key={item.id}>
+              <span className={styles.showcaseRecordIcon}><BadgeCheck size={17} aria-hidden="true" /></span>
+              <div className={styles.showcaseRecordBody}><span className={styles.showcaseType}>{item.submissionType.replace(/[_-]/g, " ")}</span><h3>{item.title}</h3><p>{item.createdAt.toLocaleDateString(lang === "th" ? "th-TH" : "en", { day: "numeric", month: "short", year: "numeric" })}</p></div>
+              {item.url && <a href={item.url} target="_blank" rel="noreferrer" className={styles.showcaseSource} aria-label={`${showcaseCopy.source}: ${item.title}`}><ExternalLink size={15} aria-hidden="true" /></a>}
+            </article>) : <article className={styles.showcaseEmpty}><span><Database size={19} aria-hidden="true" /></span><div><strong>{showcaseCopy.emptyTitle}</strong><p>{showcaseCopy.emptyDescription}</p></div></article>}
           </div>
-          
-          <form action={logoutUser} style={{ marginTop: "14px" }}>
-            <button className="primary" style={{ background: "var(--danger)", borderColor: "var(--danger)" }}>
-              Logout
-            </button>
-          </form>
-        </section>
-      ) : (
-        <section className="panel" style={{ border: "1px solid var(--warning)", marginBottom: "20px" }}>
-          <h2>Authentication & Registration</h2>
-          <p className="muted" style={{ marginBottom: 14 }}>
-            Register a new account or log in with an existing email to track submissions and show your contribution history.
-          </p>
+        </div>
+      </section>
 
-          <form action={registerAndLoginUser} className="form" style={{ maxWidth: "400px", gap: "12px" }}>
-            <label>
-              Email Address
-              <input name="email" type="email" required placeholder="ichiro.kato@waseda.jp" />
-            </label>
-            <label>
-              Full Name (Optional)
-              <input name="name" placeholder="Ichiro Kato" />
-            </label>
-            <label>
-              Role
-              <select name="role" defaultValue="USER">
-                <option value="USER">User (Read-only)</option>
-                <option value="RESEARCHER">Researcher</option>
-                <option value="ADMIN">Administrator</option>
-              </select>
-            </label>
-            <button type="submit" className="primary" style={{ marginTop: "6px" }}>
-              Log In / Register
-            </button>
-          </form>
-
-          <div style={{ borderTop: "1px solid var(--border)", paddingTop: "14px", marginTop: "14px" }}>
-            <span className="muted" style={{ fontSize: "12px" }}>Quick Simulators:</span>
-            <div style={{ display: "flex", gap: "10px", marginTop: "8px" }}>
-              <form action={loginAsUser.bind(null, "creativelab.co.th@gmail.com", "ADMIN")}>
-                <button type="submit" className="button" style={{ fontSize: "11px", minHeight: "28px" }}>
-                  Login as Administrator
-                </button>
-              </form>
-              <form action={loginAsUser.bind(null, "researcher@example.com", "RESEARCHER")}>
-                <button type="submit" className="button" style={{ fontSize: "11px", minHeight: "28px" }}>
-                  Login as Researcher
-                </button>
-              </form>
+      <section className={styles.submissionsSection}>
+        <header className={styles.sectionHeading}><div><span className={styles.kicker}>{profileCopy.activity}</span><h2>{profileCopy.history}</h2><p>{profileCopy.historyLead}</p></div><Link href="/submit-data" className={styles.secondaryButton}>{profileCopy.submitRecord} <ArrowRight size={15} aria-hidden="true" /></Link></header>
+        {submissions.length ? <div className={styles.submissionList}>{submissions.map((item) => <article className={styles.submissionItem} key={item.id}>
+          <div className={styles.submissionIcon}><Bot size={18} aria-hidden="true" /></div>
+          <div className={styles.submissionMain}><h3>{item.title}</h3><p>{item.submissionType.replace(/[_-]/g, " ")} · {item.createdAt.toLocaleDateString(lang === "th" ? "th-TH" : "en", { day: "numeric", month: "short", year: "numeric" })}</p>{item.reviewNotes || item.notes ? <small>{item.reviewNotes || item.notes}</small> : null}
+            <div className={`${styles.workflow} ${["REJECTED", "FAILED"].includes(item.status) ? styles.workflowStopped : ""}`} aria-label={`${profileCopy.history}: ${statusLabel[item.status] || item.status}`}>
+              {[[profileCopy.submittedStep, 1], [profileCopy.processing, 2], [profileCopy.review, 3], [profileCopy.inAtlas, 4]].map(([label, step]) => <span key={label} className={`${styles.workflowStep} ${Number(step) <= workflowProgress(item.status) ? styles.workflowComplete : ""} ${Number(step) === workflowProgress(item.status) && item.status !== "APPROVED" ? styles.workflowCurrent : ""}`}><i />{label}</span>)}
             </div>
           </div>
-        </section>
-      )}
+          <span className={`${styles.statusBadge} ${statusClass(item.status)}`}>{statusLabel[item.status] || item.status.replace(/_/g, " ")}</span>
+          {item.url ? <a className={styles.sourceLink} href={item.url} target="_blank" rel="noreferrer">{profileCopy.openSource} <ArrowRight size={13} aria-hidden="true" /></a> : null}
+        </article>)}</div> : <div className={styles.emptyState}><span><Database size={20} aria-hidden="true" /></span><strong>{profileCopy.noSubmissions}</strong><p>{profileCopy.noSubmissionsLead}</p><Link href="/submit-data" className={styles.primaryButton}>{profileCopy.submitFirst} <ArrowRight size={16} aria-hidden="true" /></Link></div>}
+      </section>
+    </>}
 
-      {currentUser && (
-        <section className="panel" style={{ marginBottom: "20px" }}>
-          <h2>Community Contribution Profile</h2>
-          <p className="muted" style={{ marginBottom: 12 }}>
-            Submissions linked to this account appear here so you can track review progress and show what you have contributed to the atlas.
-          </p>
-          <div className="stat-grid" style={{ marginBottom: 14 }}>
-            <div className="metric-card">
-              <span>Total submitted</span>
-              <strong>{userSubmissions.length}</strong>
-            </div>
-            <div className="metric-card">
-              <span>Approved</span>
-              <strong>{userSubmissions.filter((item) => item.status === "APPROVED").length}</strong>
-            </div>
-            <div className="metric-card">
-              <span>In review</span>
-              <strong>{userSubmissions.filter((item) => ["QUEUED", "NEEDS_REVIEW", "ANALYZED", "FETCHING"].includes(item.status)).length}</strong>
-            </div>
-          </div>
-
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Submission</th>
-                  <th>Type</th>
-                  <th>Status</th>
-                  <th>Reviewer Notes</th>
-                  <th>Submitted</th>
-                </tr>
-              </thead>
-              <tbody>
-                {userSubmissions.map((item) => (
-                  <tr key={item.id}>
-                    <td>
-                      <strong>{item.title}</strong>
-                      {item.url && (
-                        <div style={{ marginTop: 4 }}>
-                          <a href={item.url} target="_blank" rel="noreferrer" style={{ fontSize: 12, wordBreak: "break-all" }}>
-                            {item.url}
-                          </a>
-                        </div>
-                      )}
-                    </td>
-                    <td><span className="badge">{item.submissionType.replace(/_/g, " ")}</span></td>
-                    <td>
-                      <span className={`badge ${item.status === "APPROVED" ? "ok" : item.status === "REJECTED" || item.status === "FAILED" ? "danger" : "warn"}`}>
-                        {item.status.toLowerCase()}
-                      </span>
-                    </td>
-                    <td style={{ fontSize: 12, color: "var(--text-secondary)", maxWidth: 280 }}>
-                      {item.reviewNotes || item.notes || "Manual review pending."}
-                    </td>
-                    <td style={{ fontSize: 12 }}>{item.createdAt.toLocaleDateString()}</td>
-                  </tr>
-                ))}
-                {!userSubmissions.length && (
-                  <tr>
-                    <td className="empty" colSpan={5}>No submissions linked to this profile yet.</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-
-      <h2>Corpus Users List ({users.length})</h2>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Email</th>
-              <th>Role</th>
-              <th>Registered At</th>
-            </tr>
-          </thead>
-          <tbody>
-            {users.map((user) => (
-              <tr key={user.id}>
-                <td>{user.name || "N/A"}</td>
-                <td><code>{user.email}</code></td>
-                <td>
-                  <span className={`badge ${user.role === "ADMIN" ? "ok" : ""}`}>{user.role}</span>
-                </td>
-                <td>{user.createdAt.toLocaleString()}</td>
-              </tr>
-            ))}
-            {!users.length && (
-              <tr>
-                <td className="empty" colSpan={4}>No users registered in database.</td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </>
-  );
+    {activeRole === "ADMIN" && <section className={styles.adminSection}>
+      <header className={styles.sectionHeading}><div><span className={styles.kicker}>{profileCopy.administration}</span><h2>{profileCopy.atlasAccounts}</h2><p>{profileCopy.accountsLead}</p></div><span className={styles.userCount}>{users.length} {profileCopy.accounts}</span></header>
+      <div className={styles.userList}>{users.map((user) => <article className={styles.userRow} key={user.id}><span className={styles.userAvatar}>{(user.name || user.email).slice(0, 1).toUpperCase()}</span><span><strong>{user.name || profileCopy.unnamedMember}</strong><small>{user.email}</small></span><span className={styles.roleBadge}>{roleLabel[user.role] || user.role}</span><time>{user.createdAt.toLocaleDateString(lang === "th" ? "th-TH" : "en", { day: "numeric", month: "short", year: "numeric" })}</time></article>)}{!users.length && <p className={styles.emptyUsers}>{profileCopy.noAccounts}</p>}</div>
+    </section>}
+  </div>;
 }

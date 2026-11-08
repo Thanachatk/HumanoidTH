@@ -1,6 +1,7 @@
 "use client";
 
-import { useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import { setLanguage } from "../actions";
 
 interface LanguageSelectorProps {
@@ -9,11 +10,30 @@ interface LanguageSelectorProps {
 
 export default function LanguageSelector({ currentLang }: LanguageSelectorProps) {
   const [isPending, startTransition] = useTransition();
+  const [selectedLang, setSelectedLang] = useState(currentLang);
+  const router = useRouter();
+
+  // A layout refresh changes the prop after the language cookie has been saved.
+  // Keep the control in sync if navigation updates it from another tab or page.
+  useEffect(() => {
+    setSelectedLang(currentLang);
+  }, [currentLang]);
 
   const handleLangChange = (lang: "en" | "th") => {
-    if (lang === currentLang) return;
+    if (lang === selectedLang || isPending) return;
+    const previousLang = selectedLang;
+    setSelectedLang(lang);
+    window.dispatchEvent(new CustomEvent("atlas-language-change", { detail: lang }));
+
     startTransition(async () => {
-      await setLanguage(lang);
+      try {
+        await setLanguage(lang);
+        // setLanguage updates a cookie on the server. Refresh the current route so
+        // every page reads the new layout language without changing its URL.
+        router.refresh();
+      } catch {
+        setSelectedLang(previousLang);
+      }
     });
   };
 
@@ -21,7 +41,7 @@ export default function LanguageSelector({ currentLang }: LanguageSelectorProps)
     <div className={`lang-selector ${isPending ? "loading" : ""}`}>
       <button
         onClick={() => handleLangChange("en")}
-        className={currentLang === "en" ? "active" : ""}
+        className={selectedLang === "en" ? "active" : ""}
         aria-label="English"
         disabled={isPending}
       >
@@ -30,7 +50,7 @@ export default function LanguageSelector({ currentLang }: LanguageSelectorProps)
       </button>
       <button
         onClick={() => handleLangChange("th")}
-        className={currentLang === "th" ? "active" : ""}
+        className={selectedLang === "th" ? "active" : ""}
         aria-label="ภาษาไทย"
         disabled={isPending}
       >

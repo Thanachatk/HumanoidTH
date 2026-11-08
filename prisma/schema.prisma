@@ -39,8 +39,19 @@ enum ReviewStatus {
 
 enum UserRole {
   USER
-  RESEARCHER
+  COMPANY
   ADMIN
+  REVIEWER
+  LAB
+  ORGANIZER
+  JUDGE
+  MODERATOR
+}
+
+enum CompanyMemberRole {
+  OWNER
+  EDITOR
+  VIEWER
 }
 
 enum PullStatus {
@@ -51,14 +62,65 @@ enum PullStatus {
   SKIPPED_MISSING_KEY
 }
 
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+  EXPIRED
+}
+
 model User {
-  id              String          @id @default(cuid())
-  email           String          @unique
-  name            String?
-  role            UserRole        @default(USER)
-  submissions     SubmittedData[]
-  createdAt       DateTime        @default(now())
-  updatedAt       DateTime        @updatedAt
+  id                 String              @id @default(cuid())
+  email              String              @unique
+  name               String?
+  role               UserRole            @default(USER)
+  passwordHash       String?
+  submissions        SubmittedData[]
+  companyMemberships CompanyMembership[]
+  subscriptions      Subscription[]
+  challengeSubmissions ChallengeSubmission[]
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+}
+
+model Subscription {
+  id                   String             @id @default(cuid())
+  userId               String
+  plan                 String             @default("ATLAS_DASHBOARD")
+  status               SubscriptionStatus @default(ACTIVE)
+  currentPeriodEnd     DateTime?
+  provider             String?
+  providerReference    String?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+  user                 User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@unique([provider, providerReference])
+}
+
+model Company {
+  id               String                   @id @default(cuid())
+  name             String                   @unique
+  isVerified       Boolean                  @default(false)
+  members          CompanyMembership[]
+  modelEvaluations CompanyModelEvaluation[]
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
+}
+
+model CompanyMembership {
+  id        String            @id @default(cuid())
+  userId    String
+  companyId String
+  role      CompanyMemberRole @default(EDITOR)
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company   Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  @@unique([userId, companyId])
+  @@index([companyId])
 }
 
 model SourceRecord {
@@ -249,4 +311,195 @@ model OwnedInventory {
   updatedAt          DateTime    @updatedAt
 
   @@index([robotModelId])
+}
+
+
+model CommunityPost {
+  id             String             @id @default(cuid())
+  slug           String             @unique
+  title          String
+  authorId       String?
+  visibilityStatus String           @default("PUBLISHED")
+  sourcesJson    Json               @default("[]")
+  content        String
+  type           String             @default("DISCUSSION")
+  communityName  String             @default("r/HumanoidTH")
+  authorName     String             @default("Robotics Explorer")
+  authorHandle   String             @default("robotics_explorer")
+  authorBadge    String             @default("Community Member")
+  isVerified     Boolean            @default(false)
+  mediaUrl       String?
+  tags           String[]
+  upvotes        Int                @default(1)
+  downvotes      Int                @default(0)
+  viewsCount     Int                @default(1)
+  isPinned       Boolean            @default(false)
+  comments       CommunityComment[]
+  votes          CommunityVote[]
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  @@index([type])
+  @@index([createdAt])
+  @@index([communityName])
+}
+
+model CommunityComment {
+  id           String             @id @default(cuid())
+  postId       String
+  post         CommunityPost      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  parentId     String?
+  parent       CommunityComment?  @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies      CommunityComment[] @relation("CommentReplies")
+  content      String
+  authorName   String             @default("Robotics Enthusiast")
+  authorHandle String             @default("enthusiast")
+  authorBadge  String             @default("Robotics Enthusiast")
+  isVerified   Boolean            @default(false)
+  upvotes      Int                @default(1)
+  downvotes    Int                @default(0)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  @@index([postId])
+  @@index([parentId])
+}
+
+model CommunityVote {
+  id        String        @id @default(cuid())
+  postId    String
+  post      CommunityPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userKey   String
+  voteType  String
+  createdAt DateTime      @default(now())
+
+  @@unique([postId, userKey])
+}
+
+model ChallengeSubmission {
+  id             String   @id @default(cuid())
+  challengeId    String
+  teamName       String
+  contactEmail   String
+  solutionTitle  String
+  description    String?
+  repoUrl        String?
+  videoUrl       String?
+  requestKey     String?  @unique
+  submittedById  String?
+  submittedBy    User?    @relation(fields: [submittedById], references: [id], onDelete: SetNull)
+  dockerImage    String?
+  hardwareSpecs  String?
+  benchmarkScore Float?
+  status         String   @default("SUBMITTED")
+  submittedAt    DateTime @default(now())
+
+  @@index([challengeId])
+  @@index([submittedById, challengeId, submittedAt])
+  @@index([status])
+}
+
+
+model HriSimulationRun {
+  id                  String   @id @default(cuid())
+  runCode             String   @unique
+  robotId             String
+  robotName           String
+  sceneVersion        String   @default("wellness-reception-v1.0")
+  simulationMode      String   @default("interactive-hri-living-lab")
+  testCaseType        String
+  terminalStatus      String
+  testCasePassed      Boolean  @default(true)
+  navigationSucceeded Boolean  @default(false)
+  durationSec         Float
+  errorReason         String?
+  eventsJson          Json     @default("[]")
+  createdAt           DateTime @default(now())
+
+  @@index([robotId])
+  @@index([testCaseType])
+  @@index([createdAt])
+}
+
+
+model CompanyModelEvaluation {
+  id                  String   @id @default(cuid())
+  companyId           String?
+  reviewerId          String?
+  approvedSnapshot    Json     @default("{}")
+  historyJson         Json     @default("[]")
+  revision            Int      @default(0)
+  physicalReportId    String?
+  company             Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  modelCode           String
+  version             String   @default("v1.0.0")
+  groupId             String   @default("industrial-pick-place")
+  groupName           String   @default("หุ่นยนต์หยิบวางชิ้นงานในภาคการผลิต (Industrial Pick & Place)")
+  protocolCode        String   @default("TH-IND-PP-2026.1")
+  companyName         String
+  contactName         String
+  contactEmail        String
+  contactPhone        String?
+  modelName           String
+  robotClass          String   @default("Industrial Cobot / Manipulator")
+  hardwareSpec        String
+  firmwareVersion     String
+  taskEvaluated       String   @default("การหยิบวางชิ้นงานความละเอียดสูงบนสายพาน (High-Precision Bin Picking & Palletizing)")
+  testConditions      String   @default("ชิ้นงานมาตรฐาน 250g · ความเร็วสายพานคงที่ · ทดสอบต่อเนื่อง 50 รอบภายใต้โปรโตคอล TH-IND-PP-2026.1")
+  workflowStatus      String   @default("DRAFT")
+  safetyStatus        String   @default("PENDING")
+  precisionMm         Float?
+  speedSec            Float?
+  evaluatorName       String?  @default("ดร. ภาคภูมิ วงศ์วิศิษฏ์ (Lead Protocol Evaluator)")
+  evaluatorNotes      String?
+  sampleReportTitle   String?
+  sampleReportSummary String?
+  evidenceLinksJson   Json     @default("[]")
+  publishedFieldsJson Json     @default("{}")
+  isPublished         Boolean  @default(false)
+  allowContact        Boolean  @default(true)
+  isDemoData          Boolean  @default(true)
+  evaluatedAt         DateTime @default(now())
+  publishedAt         DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([modelCode, version])
+  @@index([companyId])
+  @@index([groupId, isPublished])
+  @@index([workflowStatus])
+}
+
+model PlatformRecord {
+  id           String   @id @default(cuid())
+  kind         String
+  ownerId      String
+  requestHash  String?
+  uniqueKey    String?  @unique
+  assignedToId String?
+  parentId     String?
+  title        String
+  status       String   @default("DRAFT")
+  revision     Int      @default(0)
+  isPublished  Boolean  @default(false)
+  data         Json     @default("{}")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([kind, ownerId])
+  @@index([kind, status, isPublished])
+  @@index([parentId])
+  @@index([assignedToId])
+}
+
+model PlatformEvent {
+  id         String   @id @default(cuid())
+  recordId   String
+  actorId    String
+  action     String
+  revision   Int
+  details    Json     @default("{}")
+  createdAt  DateTime @default(now())
+
+  @@unique([recordId, revision])
 }
